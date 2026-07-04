@@ -10,8 +10,8 @@ AJUSTE V1.0.5 - 03/07/2026
  ERP LABORATORIO PSI
  PRODUCTOS Y SERVICIOS INDUSTRIALES C. LTDA.
 
- VERSION MAESTRA OFICIAL
- V1.0.3 ESTABLE · BANDEJA LABORATORIO CORREGIDA
+ VERSION ENTERPRISE
+ V2.0 FIREBASE TIEMPO REAL · NETLIFY/GITHUB · MULTIUSUARIO
 
  Fecha de congelamiento:
  03/07/2026
@@ -40,10 +40,10 @@ AJUSTE V1.0.5 - 03/07/2026
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>ERP Laboratorio PSI 2026 — Maestro con Ingreso al Laboratorio</title>
+<title>ERP Laboratorio PSI 2026 — Enterprise Firebase Tiempo Real</title>
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-  import { getFirestore, doc, setDoc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+  import { getFirestore, doc, setDoc, getDoc, collection, getDocs, writeBatch, onSnapshot, serverTimestamp, deleteDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
   const firebaseConfig = {
     apiKey: "AIzaSyDbt0FaL1AdDrhQnbAsrivLqnJ3oKy8Suw",
@@ -60,6 +60,12 @@ AJUSTE V1.0.5 - 03/07/2026
   window.fbDoc = doc;
   window.fbSetDoc = setDoc;
   window.fbGetDoc = getDoc;
+  window.fbCollection = collection;
+  window.fbGetDocs = getDocs;
+  window.fbWriteBatch = writeBatch;
+  window.fbOnSnapshot = onSnapshot;
+  window.fbServerTimestamp = serverTimestamp;
+  window.fbDeleteDoc = deleteDoc;
   window.fbReady = true;
 
   const COL = 'erp_psi_2026';
@@ -96,7 +102,163 @@ AJUSTE V1.0.5 - 03/07/2026
     }catch(e){ console.error('Firebase cargar', key, e); return null; }
   };
 
-  console.log('✅ Firebase conectado (proyecto dqo-informes)');
+
+  /* ==========================================================
+     ERP PSI ENTERPRISE V2.0 - FIREBASE TIEMPO REAL
+     Arquitectura profesional para GitHub + Netlify:
+     - Una OT/documento por colección.
+     - Sincronización automática con onSnapshot.
+     - localStorage queda como respaldo de emergencia.
+     - Compatible con la lógica existente del ERP monolítico.
+  ========================================================== */
+  const V2_PREFIX = 'erp_psi_2026_v2_';
+  const V2_COLLECTIONS = {
+    muestras: V2_PREFIX + 'muestras',
+    informes: V2_PREFIX + 'laboratorio',
+    auditoria: V2_PREFIX + 'auditoria',
+    facturacion: V2_PREFIX + 'facturacion',
+    analistas: V2_PREFIX + 'analistas',
+    sistema: V2_PREFIX + 'sistema'
+  };
+
+  function safeDocId(v){
+    return String(v || '').trim()
+      .replace(/[\\/#?\[\]]/g,'_')
+      .replace(/\s+/g,'_')
+      .slice(0,180) || ('DOC_' + Date.now());
+  }
+  function rowDocId(row, idx){
+    return safeDocId(row?.id || row?.codigo || row?.CODIGO || ('row_' + idx));
+  }
+  async function commitBatchParts(ops){
+    let batch = writeBatch(db), count = 0;
+    for(const op of ops){
+      if(op.type === 'set') batch.set(op.ref, op.data, {merge:true});
+      if(op.type === 'delete') batch.delete(op.ref);
+      count++;
+      if(count >= 450){ await batch.commit(); batch = writeBatch(db); count = 0; }
+    }
+    if(count) await batch.commit();
+  }
+  async function syncArrayToCollection(name, arr){
+    const colName = V2_COLLECTIONS[name];
+    if(!colName || !Array.isArray(arr)) return false;
+    const colRef = collection(db, colName);
+    const snap = await getDocs(colRef);
+    const existing = new Set(snap.docs.map(d=>d.id));
+    const wanted = new Set();
+    const ops = [];
+    arr.forEach((row, idx)=>{
+      const id = rowDocId(row, idx);
+      wanted.add(id);
+      ops.push({type:'set', ref:doc(db, colName, id), data:{...row, _docId:id, _module:name, _updatedAt:serverTimestamp()}});
+    });
+    existing.forEach(id=>{ if(!wanted.has(id)) ops.push({type:'delete', ref:doc(db, colName, id)}); });
+    await commitBatchParts(ops);
+    await setDoc(doc(db, V2_COLLECTIONS.sistema, name+'_meta'), {total:arr.length, updatedAt:serverTimestamp(), updatedAtISO:new Date().toISOString()}, {merge:true});
+    return true;
+  }
+  async function syncObjectToCollection(name, obj){
+    const colName = V2_COLLECTIONS[name];
+    if(!colName || !obj || typeof obj !== 'object' || Array.isArray(obj)) return false;
+    const colRef = collection(db, colName);
+    const snap = await getDocs(colRef);
+    const existing = new Set(snap.docs.map(d=>d.id));
+    const wanted = new Set();
+    const ops = [];
+    Object.entries(obj).forEach(([key,value])=>{
+      const id = safeDocId(key);
+      wanted.add(id);
+      ops.push({type:'set', ref:doc(db, colName, id), data:{key, value:value||{}, _docId:id, _module:name, _updatedAt:serverTimestamp()}});
+    });
+    existing.forEach(id=>{ if(!wanted.has(id)) ops.push({type:'delete', ref:doc(db, colName, id)}); });
+    await commitBatchParts(ops);
+    await setDoc(doc(db, V2_COLLECTIONS.sistema, name+'_meta'), {total:Object.keys(obj).length, updatedAt:serverTimestamp(), updatedAtISO:new Date().toISOString()}, {merge:true});
+    return true;
+  }
+  async function loadCollectionArray(name){
+    const colName = V2_COLLECTIONS[name]; if(!colName) return [];
+    const snap = await getDocs(collection(db, colName));
+    return snap.docs.map(d=>{ const x=d.data(); delete x._updatedAt; delete x._module; delete x._docId; return x; });
+  }
+  async function loadCollectionObject(name){
+    const colName = V2_COLLECTIONS[name]; if(!colName) return {};
+    const snap = await getDocs(collection(db, colName));
+    const out = {};
+    snap.docs.forEach(d=>{ const x=d.data(); out[x.key || d.id] = x.value || {}; });
+    return out;
+  }
+  window.erpCloud = {
+    enabled:true,
+    applyingRemote:false,
+    timers:{},
+    collections:V2_COLLECTIONS,
+    async save(name){
+      if(!this.enabled || this.applyingRemote) return false;
+      try{
+        if(name==='muestras') await syncArrayToCollection('muestras', window.DATA || []);
+        if(name==='informes') await syncArrayToCollection('informes', window.INFORMES || []);
+        if(name==='auditoria') await syncArrayToCollection('auditoria', (window.AUDIT_LOG || []).slice(-3000));
+        if(name==='facturacion') await syncObjectToCollection('facturacion', window.FACTURACION || {});
+        if(name==='analistas') await syncArrayToCollection('analistas', (window.ANALISTAS || []).map((nombre,i)=>({id:safeDocId(nombre||i), nombre})));
+        if(typeof window.setCloudStatus==='function') window.setCloudStatus('ok','✅ Tiempo real OK');
+        return true;
+      }catch(e){
+        console.error('ERP Cloud V2 save', name, e);
+        if(typeof window.setCloudStatus==='function') window.setCloudStatus('error','❌ Error nube V2');
+        return false;
+      }
+    },
+    queue(name, delay=900){
+      if(!this.enabled || this.applyingRemote) return;
+      clearTimeout(this.timers[name]);
+      this.timers[name]=setTimeout(()=>this.save(name), delay);
+    },
+    async loadAll(){
+      this.applyingRemote = true;
+      try{
+        const [muestras, informes, auditoria, facturacion, analistas] = await Promise.all([
+          loadCollectionArray('muestras'), loadCollectionArray('informes'), loadCollectionArray('auditoria'), loadCollectionObject('facturacion'), loadCollectionArray('analistas')
+        ]);
+        if(muestras.length && Array.isArray(window.DATA)){ window.DATA.splice(0, window.DATA.length, ...muestras); }
+        if(informes.length && Array.isArray(window.INFORMES)){ window.INFORMES.splice(0, window.INFORMES.length, ...informes); }
+        if(auditoria.length && Array.isArray(window.AUDIT_LOG)){ window.AUDIT_LOG.splice(0, window.AUDIT_LOG.length, ...auditoria); }
+        if(facturacion && Object.keys(facturacion).length && window.FACTURACION){ Object.keys(window.FACTURACION).forEach(k=>delete window.FACTURACION[k]); Object.assign(window.FACTURACION, facturacion); }
+        if(analistas.length && Array.isArray(window.ANALISTAS)){ window.ANALISTAS.splice(0, window.ANALISTAS.length, ...analistas.map(x=>x.nombre).filter(Boolean)); }
+        if(typeof window.recalcAfterCloud === 'function') window.recalcAfterCloud();
+        if(typeof window.setCloudStatus==='function') window.setCloudStatus('ok','✅ Tiempo real OK');
+      }catch(e){ console.error('ERP Cloud V2 loadAll',e); if(typeof window.setCloudStatus==='function') window.setCloudStatus('error','❌ Error carga V2'); }
+      finally{ this.applyingRemote = false; }
+    },
+    listen(){
+      const listenArray = (name, target, normalizer)=>{
+        onSnapshot(collection(db, V2_COLLECTIONS[name]), snap=>{
+          if(this.applyingRemote || snap.metadata.hasPendingWrites) return;
+          const arr=snap.docs.map(d=>{const x=d.data(); delete x._updatedAt; delete x._module; delete x._docId; return normalizer?normalizer(x):x;});
+          this.applyingRemote = true;
+          try{ if(Array.isArray(window[target])){ window[target].splice(0, window[target].length, ...arr); } if(typeof window.recalcAfterCloud==='function') window.recalcAfterCloud(); if(typeof window.toast==='function') window.toast('🔄 Actualización recibida desde Firebase'); }
+          finally{ this.applyingRemote = false; }
+        }, err=>console.error('onSnapshot '+name,err));
+      };
+      const listenObject = (name, target)=>{
+        onSnapshot(collection(db, V2_COLLECTIONS[name]), snap=>{
+          if(this.applyingRemote || snap.metadata.hasPendingWrites) return;
+          const obj={}; snap.docs.forEach(d=>{const x=d.data(); obj[x.key||d.id]=x.value||{};});
+          this.applyingRemote = true;
+          try{ if(window[target]){ Object.keys(window[target]).forEach(k=>delete window[target][k]); Object.assign(window[target], obj); } if(typeof window.recalcAfterCloud==='function') window.recalcAfterCloud(); }
+          finally{ this.applyingRemote = false; }
+        }, err=>console.error('onSnapshot '+name,err));
+      };
+      listenArray('muestras','DATA');
+      listenArray('informes','INFORMES');
+      listenArray('auditoria','AUDIT_LOG');
+      listenObject('facturacion','FACTURACION');
+      listenArray('analistas','ANALISTAS', x=>x.nombre||x);
+    }
+  };
+  window.erpCloudQueue = (name, delay)=>window.erpCloud?.queue(name, delay);
+
+  console.log('✅ Firebase conectado (proyecto dqo-informes + ERP Cloud V2)');
 </script>
 <style>
 :root{--bg:#0f1117;--surface:#1a1d27;--surface2:#22263a;--border:#2e3350;--accent:#4f8ef7;--green:#22c55e;--yellow:#f59e0b;--red:#ef4444;--cyan:#06b6d4;--text:#e2e8f0;--muted:#94a3b8;--card:#1e2235}
@@ -246,7 +408,7 @@ button[onclick*="guardarIngresoOficial"]{
 
 </head>
 <body>
-<div class="hdr"><div style="display:flex;align-items:center;gap:14px"><img class="psi-logo-img" src="data:image/jpeg;base64,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3NawSvJsWadxpWdjau2xz/ax8f7FrdR7mxiZrj5LmnbJG9hktkjD9khXvImU7Ls/PevJfD/yTbeNvHZ7toLqC8Xa7EdBSWyVmv8A83DUa4n90gtEbXR4My3q6hx+DNc6tsIHiWRh+v6wWtQe5tYrLhx80LXGO0st8r/2vC2G1+5r22NwN6zZqp29rKa0ti+10j/2L38JOp0uzFvzlNy8+L6JEJ4420c9cbMkposRxWCkk5GGzxcB2n9qSZR8jgoYmrbjd6501TNUVtZUyc3veZZZXnvJ5kleiuGtgTImyubJdWX2/ubzLa2v4bCfZC1h0+UqZ8H5UZb5fsH4G4Is9qeG7vFp6VgmcPGQ+mflKyVRR2RYQ7XaZpkeGwoeij6836HnNltskZ15jPiqBhx+H7bJoXVl31p+Xe2LTiO8PR08VcjJ3Y4y0yvkgu92a7E18i0cKutiAhif60UHMNPi4ucOwhT8NAOSxoB0XjqyZzmqdrdR1NODlwR6L6vf6HIANGgGgCyiLUcyEREAREQBERAEREAREQBERAEREAREQBERAEREAREQBERAEREAREQBERAEREAREQBERAEREAREQBERAEREAREQBERAEREAREQBERAEREAREQBERAEREAREQBERAEREAREQBERAEREAREQBERAEREAREQH/2Q==" alt="PSI Productos y Servicios Industriales"><div><h1>ERP PSI PRODUCTOS Y SERVICIOS INDUSTRIALES C.LTDA</h1><div class="sub" id="headerSub">Sistema Integrado de Gestión de Laboratorio · Control Ambiental 2026</div></div></div><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-s" onclick="openModal()">＋ Nueva Muestra</button><button class="btn btn-p" onclick="document.getElementById('importFile').click()">⬆ Importar Excel</button><button class="btn btn-g" onclick="diagnostic()">🔎 Diagnóstico</button><input id="importFile" type="file" accept=".xlsx,.xls,.csv,.json" style="display:none" onchange="importExcelFile(event)"><button class="btn btn-g" onclick="exportExcel()">⬇ Excel</button><button class="btn btn-w" onclick="downloadTemplate()">📄 Plantilla</button><button class="btn btn-w" onclick="backupJSON()">💾 Respaldo</button><button class="btn btn-d" onclick="resetBlank()">🧹 Dejar ERP vacío</button><button class="btn btn-p" id="btnSubirNube" onclick="subirTodoANube()">☁ Subir Nube</button><button class="btn btn-g" id="btnCargarNube" onclick="cargarTodoDesdeNube()">☁ Cargar Nube</button><span class="role-pill">👤 Rol <select id="erpRoleSelect" onchange="setERPUserRole(this.value)"><option>CALIDAD</option><option>LABORATORIO</option><option>FACTURACION</option><option>GERENCIA</option><option>ADMIN</option></select></span><span class="badge">MASTER OFICIAL V1.0.3 · BANDEJA LAB CORREGIDA · 03/07/2026</span></div></div>
+<div class="hdr"><div style="display:flex;align-items:center;gap:14px"><img class="psi-logo-img" src="data:image/jpeg;base64,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3NawSvJsWadxpWdjau2xz/ax8f7FrdR7mxiZrj5LmnbJG9hktkjD9khXvImU7Ls/PevJfD/yTbeNvHZ7toLqC8Xa7EdBSWyVmv8A83DUa4n90gtEbXR4My3q6hx+DNc6tsIHiWRh+v6wWtQe5tYrLhx80LXGO0st8r/2vC2G1+5r22NwN6zZqp29rKa0ti+10j/2L38JOp0uzFvzlNy8+L6JEJ4420c9cbMkposRxWCkk5GGzxcB2n9qSZR8jgoYmrbjd6501TNUVtZUyc3veZZZXnvJ5kleiuGtgTImyubJdWX2/ubzLa2v4bCfZC1h0+UqZ8H5UZb5fsH4G4Is9qeG7vFp6VgmcPGQ+mflKyVRR2RYQ7XaZpkeGwoeij6836HnNltskZ15jPiqBhx+H7bJoXVl31p+Xe2LTiO8PR08VcjJ3Y4y0yvkgu92a7E18i0cKutiAhif60UHMNPi4ucOwhT8NAOSxoB0XjqyZzmqdrdR1NODlwR6L6vf6HIANGgGgCyiLUcyEREAREQBERAEREAREQBERAEREAREQBERAEREAREQBERAEREAREQBERAEREAREQBERAEREAREQBERAEREAREQBERAEREAREQBERAEREAREQBERAEREAREQBERAEREAREQBERAEREAREQBERAEREAREQH/2Q==" alt="PSI Productos y Servicios Industriales"><div><h1>ERP PSI PRODUCTOS Y SERVICIOS INDUSTRIALES C.LTDA</h1><div class="sub" id="headerSub">Sistema Integrado de Gestión de Laboratorio · Control Ambiental 2026</div></div></div><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-s" onclick="openModal()">＋ Nueva Muestra</button><button class="btn btn-p" onclick="document.getElementById('importFile').click()">⬆ Importar Excel</button><button class="btn btn-g" onclick="diagnostic()">🔎 Diagnóstico</button><input id="importFile" type="file" accept=".xlsx,.xls,.csv,.json" style="display:none" onchange="importExcelFile(event)"><button class="btn btn-g" onclick="exportExcel()">⬇ Excel</button><button class="btn btn-w" onclick="downloadTemplate()">📄 Plantilla</button><button class="btn btn-w" onclick="backupJSON()">💾 Respaldo</button><button class="btn btn-d" onclick="resetBlank()">🧹 Dejar ERP vacío</button><button class="btn btn-p" id="btnSubirNube" onclick="subirTodoANube()">☁ Subir Nube</button><button class="btn btn-g" id="btnCargarNube" onclick="cargarTodoDesdeNube()">☁ Cargar Nube</button><span class="role-pill">👤 Rol <select id="erpRoleSelect" onchange="setERPUserRole(this.value)"><option>CALIDAD</option><option>LABORATORIO</option><option>FACTURACION</option><option>GERENCIA</option><option>ADMIN</option></select></span><span class="badge">ENTERPRISE V2.0 · FIREBASE TIEMPO REAL · NETLIFY/GITHUB</span><span class="badge" id="cloudStatus" style="background:#334155">🔥 Conectando...</span></div></div>
 <div class="module-shell">
   <button class="btn module-btn" data-module-target="control" onclick="showTab('dashboard')">🔬 INGRESO DE MUESTRA</button>
   <button class="btn module-btn" data-module-target="informes" onclick="showTab('informes')">📄 INGRESO AL LABORATORIO</button>
@@ -601,12 +763,16 @@ button[onclick*="guardarIngresoOficial"]{
 'use strict';
 const STORE_KEY='psi_ingreso_muestras_LOCAL_LIMPIO_V1';
 let DATA=[]; let editId=null;
+window.DATA=DATA;
 const INFORMES_KEY=STORE_KEY+'_informes_v1';
 const AUDIT_KEY=STORE_KEY+'_audit_v1';
 const FACT_KEY=STORE_KEY+'_facturacion_v1';
 let INFORMES=[]; let editingInformeId=null; let selectedInformeSampleId=null;
+window.INFORMES=INFORMES;
 let AUDIT_LOG=[];
+window.AUDIT_LOG=AUDIT_LOG;
 let FACTURACION={};
+window.FACTURACION=FACTURACION;
 let FACT_ACCESS_GRANTED=false;
 let FACT_EDIT_UNLOCKED=false;
 let UNLOCKED_FIELDS=new Set();
@@ -671,10 +837,19 @@ function tryClearLegacyStorage(){
     return keys.length;
   }catch(e){ console.warn('No se pudo limpiar localStorage antiguo',e); return 0; }
 }
+function setCloudStatus(tipo,msg){
+  const el=document.getElementById('cloudStatus'); if(!el) return;
+  const hora=new Date().toLocaleTimeString('es-EC',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  const estilos={ok:'linear-gradient(135deg,rgba(34,197,94,.35),rgba(34,197,94,.15))',warn:'linear-gradient(135deg,rgba(245,158,11,.35),rgba(245,158,11,.15))',error:'linear-gradient(135deg,rgba(239,68,68,.35),rgba(239,68,68,.15))',info:'#334155'};
+  el.style.background=estilos[tipo]||estilos.info;
+  el.textContent=msg+(tipo==='ok'?' · '+hora:'');
+}
 async function subirTodoANube(){
   if(!window.fbReady){toast('Firebase aún no está listo, espera un segundo e intenta de nuevo');return;}
   const btn=document.getElementById('btnSubirNube'); if(btn){btn.disabled=true;btn.textContent='☁ Subiendo...';}
+  setCloudStatus('warn','☁ Subiendo...');
   try{
+    if(window.erpCloud){ await window.erpCloud.save('muestras'); await window.erpCloud.save('informes'); await window.erpCloud.save('auditoria'); await window.erpCloud.save('facturacion'); await window.erpCloud.save('analistas'); }
     const paquetes={
       muestras:DATA,
       informes:INFORMES,
@@ -688,14 +863,17 @@ async function subirTodoANube(){
       if(!r) ok=false;
     }
     toast(ok?'✅ Todo subido a la nube (Firebase)':'⚠ Algunos datos no se pudieron subir','ok');
-  }catch(e){ console.error(e); toast('❌ Error subiendo a la nube'); }
+    setCloudStatus(ok?'ok':'warn',ok?'✅ Nube OK':'⚠ Subida parcial');
+  }catch(e){ console.error(e); toast('❌ Error subiendo a la nube'); setCloudStatus('error','❌ Error Firebase'); }
   finally{ if(btn){btn.disabled=false;btn.textContent='☁ Subir Nube';} }
 }
-async function cargarTodoDesdeNube(){
-  if(!window.fbReady){toast('Firebase aún no está listo, espera un segundo e intenta de nuevo');return;}
-  if(!confirm('Esto reemplazará los datos locales de este navegador con los datos guardados en la nube. ¿Continuar?')) return;
-  const btn=document.getElementById('btnCargarNube'); if(btn){btn.disabled=true;btn.textContent='☁ Cargando...';}
+async function cargarTodoDesdeNube(silent=false){
+  if(!window.fbReady){ if(!silent) toast('Firebase aún no está listo, espera un segundo e intenta de nuevo'); return; }
+  if(!silent && !confirm('Esto reemplazará los datos locales de este navegador con los datos guardados en la nube. ¿Continuar?')) return;
+  const btn=document.getElementById('btnCargarNube'); if(btn && !silent){btn.disabled=true;btn.textContent='☁ Cargando...';}
+  setCloudStatus('warn', silent?'🔄 Sincronizando...':'☁ Cargando...');
   try{
+    if(window.erpCloud){ await window.erpCloud.loadAll(); if(!silent) toast('✅ Datos cargados desde Firebase V2'); return; }
     const m=await window.fbLoadKey('muestras');
     if(Array.isArray(m)){ DATA=m.map(calc); localStorage.setItem(STORE_KEY,JSON.stringify(DATA)); localStorage.setItem(STORE_KEY+'_backup',JSON.stringify(DATA)); }
     const inf=await window.fbLoadKey('informes');
@@ -707,16 +885,18 @@ async function cargarTodoDesdeNube(){
     const ana=await window.fbLoadKey('analistas');
     if(Array.isArray(ana)){ ANALISTAS=ana; saveAnalistas(); }
     renderAll();
-    toast('✅ Datos cargados desde la nube (Firebase)','ok');
-  }catch(e){ console.error(e); toast('❌ Error cargando desde la nube'); }
-  finally{ if(btn){btn.disabled=false;btn.textContent='☁ Cargar Nube';} }
+    if(!silent) toast('✅ Datos cargados desde la nube (Firebase)','ok');
+    else toast('🔄 Sincronizado con la nube','ok');
+    setCloudStatus('ok','✅ Nube OK');
+  }catch(e){ console.error(e); if(!silent) toast('❌ Error cargando desde la nube'); setCloudStatus('error','❌ Error Firebase'); }
+  finally{ if(btn && !silent){btn.disabled=false;btn.textContent='☁ Cargar Nube';} }
 }
 function load(){
   try{
     let raw=localStorage.getItem(STORE_KEY)||localStorage.getItem(STORE_KEY+'_backup');
     DATA=raw?JSON.parse(raw):[];
     if(!Array.isArray(DATA)) DATA=[];
-    DATA=DATA.map(calc);
+    DATA=DATA.map(calc); window.DATA=DATA;
   }catch(e){
     console.error(e);
     DATA=[];
@@ -729,6 +909,7 @@ function save(silent=false){
     localStorage.setItem(STORE_KEY,payload);
     localStorage.setItem(STORE_KEY+'_backup',payload);
     localStorage.setItem(STORE_KEY+'_last_save',new Date().toISOString());
+    if(window.erpCloudQueue) window.erpCloudQueue('muestras');
     const check=localStorage.getItem(STORE_KEY);
     if(!check) throw Error('Verificación vacía');
     const parsed=JSON.parse(check);
@@ -1358,7 +1539,7 @@ function loadAnalistas(){
     ANALISTAS=[...new Set([...ANALISTAS_BASE,...(Array.isArray(arr)?arr:[])].map(normAnalista).filter(Boolean))];
   }catch(e){ANALISTAS=[...ANALISTAS_BASE]}
 }
-function saveAnalistas(){try{localStorage.setItem(ANALISTAS_KEY,JSON.stringify(ANALISTAS));}catch(e){console.warn('No se pudo guardar catálogo analistas',e)}}
+function saveAnalistas(){try{localStorage.setItem(ANALISTAS_KEY,JSON.stringify(ANALISTAS)); if(window.erpCloudQueue) window.erpCloudQueue('analistas',1500);}catch(e){console.warn('No se pudo guardar catálogo analistas',e)}}
 function renderAnalistaSelects(selected=''){
   if(!ANALISTAS.length) loadAnalistas();
   const sel=normAnalista(selected)||'Sin asignar';
@@ -1410,8 +1591,8 @@ function calcInforme(i){
   i.updatedAt=i.updatedAt||new Date().toISOString();
   return i;
 }
-function loadInformes(){try{let raw=localStorage.getItem(INFORMES_KEY); INFORMES=raw?JSON.parse(raw):[]; if(!Array.isArray(INFORMES)) INFORMES=[]; INFORMES=INFORMES.map(calcInforme)}catch(e){console.error('loadInformes',e); INFORMES=[]}}
-function saveInformes(){try{const p=JSON.stringify(INFORMES); localStorage.setItem(INFORMES_KEY,p); localStorage.setItem(INFORMES_KEY+'_last_save',new Date().toISOString()); return true}catch(e){console.error(e); alert('No se pudo guardar Ingreso al Laboratorio. Exporte respaldo o libere almacenamiento.'); return false}}
+function loadInformes(){try{let raw=localStorage.getItem(INFORMES_KEY); INFORMES=raw?JSON.parse(raw):[]; if(!Array.isArray(INFORMES)) INFORMES=[]; INFORMES=INFORMES.map(calcInforme); window.INFORMES=INFORMES}catch(e){console.error('loadInformes',e); INFORMES=[]}}
+function saveInformes(){try{const p=JSON.stringify(INFORMES); localStorage.setItem(INFORMES_KEY,p); localStorage.setItem(INFORMES_KEY+'_last_save',new Date().toISOString()); if(window.erpCloudQueue) window.erpCloudQueue('informes'); return true}catch(e){console.error(e); alert('No se pudo guardar Ingreso al Laboratorio. Exporte respaldo o libere almacenamiento.'); return false}}
 
 function recuperarMuestrasDesdeLaboratorio(){
   // PROTECCIÓN DE BASE MAESTRA:
@@ -1459,8 +1640,8 @@ function recuperarMuestrasDesdeLaboratorio(){
   }
 }
 
-function loadAudit(){try{let raw=localStorage.getItem(AUDIT_KEY); AUDIT_LOG=raw?JSON.parse(raw):[]; if(!Array.isArray(AUDIT_LOG)) AUDIT_LOG=[];}catch(e){console.error('loadAudit',e); AUDIT_LOG=[]}}
-function saveAudit(){try{localStorage.setItem(AUDIT_KEY,JSON.stringify(AUDIT_LOG.slice(-3000)));return true}catch(e){console.error('saveAudit',e);return false}}
+function loadAudit(){try{let raw=localStorage.getItem(AUDIT_KEY); AUDIT_LOG=raw?JSON.parse(raw):[]; if(!Array.isArray(AUDIT_LOG)) AUDIT_LOG=[]; window.AUDIT_LOG=AUDIT_LOG;}catch(e){console.error('loadAudit',e); AUDIT_LOG=[]}}
+function saveAudit(){try{localStorage.setItem(AUDIT_KEY,JSON.stringify(AUDIT_LOG.slice(-3000))); if(window.erpCloudQueue) window.erpCloudQueue('auditoria',1400); return true}catch(e){console.error('saveAudit',e);return false}}
 function auditEntry(informe,accion,campo,anterior,nuevo){
   const u=currentERPUser(); const row={id:uid(),ts:new Date().toISOString(),fecha:new Date().toLocaleString(),codigo:informe?.codigo||'',cliente:informe?.cliente||'',accion, campo, anterior:anterior||'', nuevo:nuevo||'', usuario:u.nombre+' · '+u.rol};
   AUDIT_LOG.push(row); saveAudit();
@@ -2493,7 +2674,7 @@ function assertFacturacionEditable(){
 function facKeyFromRec(r){return String(r.id||r.codigo||'')}
 function loadFacturacion(){
   try{
-    FACTURACION=JSON.parse(localStorage.getItem(FACT_KEY)||'{}');
+    FACTURACION=JSON.parse(localStorage.getItem(FACT_KEY)||'{}'); window.FACTURACION=FACTURACION;
     if(!FACTURACION || typeof FACTURACION!=='object' || Array.isArray(FACTURACION)) FACTURACION={};
   }catch(e){FACTURACION={};}
 }
@@ -2503,6 +2684,7 @@ function saveFacturacion(){
     localStorage.setItem(FACT_KEY,payload);
     localStorage.setItem(FACT_KEY+'_backup',payload);
     localStorage.setItem(FACT_KEY+'_last_save',new Date().toISOString());
+    if(window.erpCloudQueue) window.erpCloudQueue('facturacion');
     const check=localStorage.getItem(FACT_KEY);
     if(check!==payload) throw Error('Verificación de facturación fallida');
     return true;
@@ -2745,6 +2927,48 @@ loadAnalistas();
 renderAnalistaSelects('Sin asignar');
 renderAll();
 setTimeout(()=>showTab('dashboard'),0);
+
+
+function recalcAfterCloud(){
+  try{
+    if(Array.isArray(DATA)) DATA=DATA.map(calc);
+    window.DATA=DATA;
+    if(Array.isArray(INFORMES)) INFORMES=INFORMES.map(calcInforme);
+    window.INFORMES=INFORMES;
+    window.AUDIT_LOG=AUDIT_LOG;
+    window.FACTURACION=FACTURACION;
+    try{ localStorage.setItem(STORE_KEY,JSON.stringify(DATA)); localStorage.setItem(STORE_KEY+'_backup',JSON.stringify(DATA)); }catch(e){}
+    try{ localStorage.setItem(INFORMES_KEY,JSON.stringify(INFORMES)); }catch(e){}
+    try{ localStorage.setItem(AUDIT_KEY,JSON.stringify(AUDIT_LOG)); }catch(e){}
+    try{ localStorage.setItem(FACT_KEY,JSON.stringify(FACTURACION)); }catch(e){}
+    renderAll();
+  }catch(e){console.warn('No se pudo recalcular después de nube:',e);}
+}
+window.recalcAfterCloud=recalcAfterCloud;
+
+// SINCRONIZACIÓN AUTOMÁTICA AL ABRIR
+// Cada vez que se abre este HTML (en cualquier computadora), espera a que Firebase
+// esté listo y descarga automáticamente lo último guardado en la nube, para que
+// todos vean siempre los mismos datos que están publicados en Netlify.
+(function autoSyncNubeAlAbrir(){
+  let intentos=0;
+  const esperar=setInterval(()=>{
+    intentos++;
+    if(window.fbReady){
+      clearInterval(esperar);
+      if(window.erpCloud){
+        window.erpCloud.loadAll().then(()=>window.erpCloud.listen());
+      }else{
+        cargarTodoDesdeNube(true);
+      }
+    } else if(intentos>40){ // ~10 segundos máximo esperando conexión
+      clearInterval(esperar);
+      console.warn('No se pudo conectar a Firebase para sincronizar automáticamente.');
+      setCloudStatus('error','⚠ Sin conexión a nube');
+    }
+  },250);
+})();
+
 </script>
 </body>
 </html>
